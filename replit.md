@@ -62,6 +62,28 @@ Preferred communication style: Simple, everyday language.
 - **Firebase Console**: Database and authentication management
 
 ### Configuration Requirements
-- **Service Account Key**: Firebase service account credentials (serviceAccountKey.json)
+- **Firebase Credentials**: Firebase service account credentials stored as FIREBASE_KEY secret
 - **Environment Variables**: API endpoints and configuration settings
 - **CORS Configuration**: Cross-origin resource sharing for mobile app integration
+
+## Recent Changes (September 10, 2025)
+
+### API Implementation Completed
+- **User Authentication**: All API endpoints now require Firebase Auth Bearer tokens
+- **User-Specific Data**: API endpoints now work with user-scoped transaction data
+- **Prediction Algorithm**: Implemented next month expense prediction using Linear Regression
+- **Firebase Integration**: Updated to use FIREBASE_KEY secret instead of JSON file
+- **Response Format**: API responses now match Flutter app expectations with `predicted_expense` field
+
+### API Endpoints
+- `GET /` - API information and available endpoints
+- `GET /health` - Health check with Firebase connection status
+- `GET /transactions` - Get user's transactions (requires auth)
+- `GET /train` - Train ML model with user's data (requires auth)
+- `POST /predict` - Generate next month expense prediction (requires auth)
+- `GET /predictions` - Get stored predictions (requires auth)
+
+### Data Structure
+- **User Transactions**: `users/{uid}/transactions/` collection
+- **User Predictions**: `users/{uid}/prediction/next_month` document
+- **Prediction Format**: `{ predicted_expense: number, created_at: timestamp, month: string }`

@@ -8,7 +8,7 @@ from sklearn.preprocessing import LabelEncoder
 from datetime import datetime, timedelta
 import json
 import os
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from functools import wraps
 
 app = Flask(__name__)
@@ -46,7 +46,7 @@ def initialize_firebase():
         print("Firebase features will be unavailable until credentials are provided.")
         return False
 
-def verify_firebase_token(token: str) -> str:
+def verify_firebase_token(token: str) -> Optional[str]:
     """Verify Firebase ID token and return user UID"""
     try:
         decoded_token = auth.verify_id_token(token)
@@ -72,11 +72,13 @@ def require_auth(f):
         return f(user_uid, *args, **kwargs)
     return decorated_function
 
-def get_transactions_data(user_uid: str = None) -> List[Dict[str, Any]]:
+def get_transactions_data(user_uid: Optional[str] = None) -> List[Dict[str, Any]]:
     """Retrieve transactions from Firestore for a specific user or all users"""
     global db
     if not db:
         if not initialize_firebase():
+            return []
+        if not db:  # Still None after initialization
             return []
     
     try:
