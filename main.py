@@ -26,16 +26,20 @@ def initialize_firebase():
             if os.path.exists('serviceAccountKey.json'):
                 cred = credentials.Certificate('serviceAccountKey.json')
                 firebase_admin.initialize_app(cred)
+                db = firestore.client()
+                print("Firebase initialized successfully with service account key")
+                return True
             else:
-                # Use default credentials if available
-                cred = credentials.ApplicationDefault()
-                firebase_admin.initialize_app(cred)
-        
-        db = firestore.client()
-        print("Firebase initialized successfully")
-        return True
+                print("Warning: No Firebase service account key found. Firebase features will be unavailable.")
+                print("Please add your serviceAccountKey.json file to enable Firestore integration.")
+                return False
+        else:
+            db = firestore.client()
+            print("Firebase already initialized")
+            return True
     except Exception as e:
         print(f"Error initializing Firebase: {e}")
+        print("Firebase features will be unavailable until credentials are provided.")
         return False
 
 def get_transactions_data() -> List[Dict[str, Any]]:
@@ -221,6 +225,12 @@ def home():
 def get_transactions():
     """Get all transactions from Firestore"""
     try:
+        if not db:
+            return jsonify({
+                "success": False,
+                "error": "Firebase not initialized. Please configure Firebase credentials."
+            }), 503
+        
         transactions = get_transactions_data()
         return jsonify({
             "success": True,
@@ -237,6 +247,12 @@ def get_transactions():
 def train_model():
     """Train the expense prediction model"""
     try:
+        if not db:
+            return jsonify({
+                "success": False,
+                "error": "Firebase not initialized. Please configure Firebase credentials."
+            }), 503
+        
         transactions = get_transactions_data()
         if not transactions:
             return jsonify({
@@ -271,7 +287,10 @@ def get_predictions():
     
     try:
         if not db:
-            initialize_firebase()
+            return jsonify({
+                "success": False,
+                "error": "Firebase not initialized. Please configure Firebase credentials."
+            }), 503
         
         predictions_ref = db.collection('predictions')
         docs = predictions_ref.stream()
@@ -297,6 +316,12 @@ def get_predictions():
 def generate_predictions():
     """Generate new expense predictions and store them"""
     try:
+        if not db:
+            return jsonify({
+                "success": False,
+                "error": "Firebase not initialized. Please configure Firebase credentials."
+            }), 503
+        
         # Get parameters from request
         data = request.get_json() or {}
         days_ahead = data.get('days_ahead', 30)

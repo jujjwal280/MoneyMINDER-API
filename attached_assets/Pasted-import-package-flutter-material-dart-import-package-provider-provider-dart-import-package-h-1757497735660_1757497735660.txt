@@ -1,0 +1,145 @@
+import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
+import 'package:http/http.dart' as http;
+import 'dart:convert';
+import 'dart:async'; // Import for TimeoutException
+import 'dart:io'; // Import for SocketException
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:intl/intl.dart';
+import 'package:start1/providers/prediction_provider.dart';
+
+class FutureInsightScreen extends StatefulWidget {
+  const FutureInsightScreen({super.key});
+
+  @override
+  State<FutureInsightScreen> createState() => _FutureInsightScreenState();
+}
+
+class _FutureInsightScreenState extends State<FutureInsightScreen> {
+  bool _isLoading = false;
+
+  Future<void> _triggerPredictionAPI() async {
+    setState(() { _isLoading = true; });
+
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) {
+      _showSnackbar("❌ No user logged in.");
+      setState(() { _isLoading = false; });
+      return;
+    }
+
+    try {
+      final idToken = await user.getIdToken();
+
+      // The URL now correctly points to the /predict endpoint.
+      final url = Uri.parse('https://d64ef0c9-567b-4d09-96e8-1b5bf430efcd-00-k13znw81qlls.riker.replit.dev/predict');
+
+
+      final response = await http.post(
+        url,
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer $idToken',
+        },
+        body: jsonEncode({}),
+      ).timeout(const Duration(seconds: 45)); // Increased timeout for ML model
+
+      if (response.statusCode == 200) {
+        // --- THE FIX ---
+        // 1. Parse the JSON response from the API.
+        final responseData = jsonDecode(response.body);
+        final dynamic newPrediction = responseData['predicted_expense'];
+
+        // 2. Convert the new prediction to a double, allowing for null.
+        final double? newPredictionValue = (newPrediction as num?)?.toDouble();
+
+        // 3. Update the provider directly with the new value from the API.
+        // This avoids the race condition of re-fetching from Firestore.
+        if (mounted) {
+          Provider.of<PredictionProvider>(context, listen: false)
+              .updatePrediction(newPredictionValue);
+        }
+        _showSnackbar("✅ Prediction updated successfully!");
+        // --- END FIX ---
+
+      } else {
+        _showSnackbar("❌ API Error ${response.statusCode}: ${response.body}");
+      }
+    } on TimeoutException {
+      _showSnackbar("🔥 Network Error: The request timed out. The server might be busy or asleep.");
+    } on SocketException {
+      _showSnackbar("🔥 Network Error: Could not connect to the server. Check your internet connection.");
+    } catch (e) {
+      _showSnackbar("🔥 An unexpected error occurred: $e");
+    }
+
+    setState(() { _isLoading = false; });
+  }
+
+  void _showSnackbar(String message) {
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(message)),
+      );
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final predictionProvider = Provider.of<PredictionProvider>(context);
+    final nextMonth = DateFormat('MMMM').format(DateTime(DateTime.now().year, DateTime.now().month + 1));
+    final predictedExpense = predictionProvider.predictedExpense;
+
+    return Scaffold(
+      body: RefreshIndicator(
+        color: const Color(0xFF053F5C),
+        onRefresh: _triggerPredictionAPI,
+        child: ListView(
+          padding: const EdgeInsets.all(16.0),
+          children: [
+            const Text(
+              'Future Insight',
+              style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
+            ),
+            const SizedBox(height: 10),
+            Card(
+              elevation: 8,
+              child: Padding(
+                padding: const EdgeInsets.all(16.0),
+                child: Column(
+                  children: [
+                    Text(
+                      "$nextMonth's Predicted Expenditure",
+                      style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: Color(0xFF053F5C)),
+                    ),
+                    const SizedBox(height: 15),
+                    if (_isLoading)
+                      const CircularProgressIndicator()
+                    else if (predictedExpense != null)
+                      Text(
+                        "₹${predictedExpense.toStringAsFixed(2)}",
+                        style: TextStyle(fontSize: 32, fontWeight: FontWeight.bold, color: Colors.red[900]),
+                      )
+                    else
+                      Text(
+                        "Not enough data to predict 💤",
+                        style: TextStyle(fontSize: 18, fontWeight: FontWeight.w500, color: Colors.grey[700]),
+                      ),
+                  ],
+                ),
+              ),
+            ),
+            const SizedBox(height: 40),
+            const Center(
+              child: Text(
+                "Pull down to refresh the prediction.",
+                style: TextStyle(fontSize: 16, color: Colors.grey),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
