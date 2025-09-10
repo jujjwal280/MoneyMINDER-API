@@ -244,9 +244,13 @@ def store_prediction_to_firestore(user_uid: str, predicted_expense: float) -> bo
         print(f"Error storing prediction: {e}")
         return False
 
-@app.route('/', methods=['GET'])
+@app.route('/', methods=['GET', 'POST'])
 def home():
-    """Home endpoint"""
+    """Home endpoint - redirect POST requests to predict"""
+    if request.method == 'POST':
+        # If someone POSTs to root, redirect to predict endpoint
+        return generate_predictions()
+    
     return jsonify({
         "message": "Expense Prediction API",
         "version": "1.0",
@@ -254,6 +258,7 @@ def home():
             "GET /transactions - Get all transactions",
             "GET /predictions - Get expense predictions",
             "POST /predict - Generate new predictions",
+            "POST / - Also accepts predictions (redirects to /predict)",
             "GET /train - Train the ML model"
         ]
     })
