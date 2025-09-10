@@ -1,6 +1,6 @@
 from flask import Flask, request, jsonify
 import firebase_admin
-from firebase_admin import credentials, firestore
+from firebase_admin import credentials, firestore, auth
 import pandas as pd
 import numpy as np
 from sklearn.linear_model import LinearRegression
@@ -9,6 +9,7 @@ from datetime import datetime, timedelta
 import json
 import os
 from typing import List, Dict, Any
+from functools import wraps
 
 app = Flask(__name__)
 
@@ -18,20 +19,23 @@ expense_model = None
 category_encoder = None
 
 def initialize_firebase():
-    """Initialize Firebase Admin SDK"""
+    """Initialize Firebase Admin SDK using secret key"""
     global db
     try:
         if not firebase_admin._apps:
-            # Check if we have a service account key file
-            if os.path.exists('serviceAccountKey.json'):
-                cred = credentials.Certificate('serviceAccountKey.json')
+            # Get Firebase credentials from environment variable
+            firebase_key = os.environ.get('FIREBASE_KEY')
+            if firebase_key:
+                # Parse the JSON string from the secret
+                service_account_info = json.loads(firebase_key)
+                cred = credentials.Certificate(service_account_info)
                 firebase_admin.initialize_app(cred)
                 db = firestore.client()
-                print("Firebase initialized successfully with service account key")
+                print("Firebase initialized successfully with secret key")
                 return True
             else:
-                print("Warning: No Firebase service account key found. Firebase features will be unavailable.")
-                print("Please add your serviceAccountKey.json file to enable Firestore integration.")
+                print("Warning: FIREBASE_KEY secret not found. Firebase features will be unavailable.")
+                print("Please set your FIREBASE_KEY secret to enable Firestore integration.")
                 return False
         else:
             db = firestore.client()
@@ -42,15 +46,47 @@ def initialize_firebase():
         print("Firebase features will be unavailable until credentials are provided.")
         return False
 
-def get_transactions_data() -> List[Dict[str, Any]]:
-    """Retrieve all transactions from Firestore"""
+def verify_firebase_token(token: str) -> str:
+    """Verify Firebase ID token and return user UID"""
+    try:
+        decoded_token = auth.verify_id_token(token)
+        return decoded_token['uid']
+    except Exception as e:
+        print(f"Token verification error: {e}")
+        return None
+
+def require_auth(f):
+    """Decorator to require Firebase authentication"""
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        auth_header = request.headers.get('Authorization')
+        if not auth_header or not auth_header.startswith('Bearer '):
+            return jsonify({'success': False, 'error': 'Authorization header required'}), 401
+        
+        token = auth_header.split('Bearer ')[1]
+        user_uid = verify_firebase_token(token)
+        if not user_uid:
+            return jsonify({'success': False, 'error': 'Invalid token'}), 401
+        
+        # Pass user_uid to the function
+        return f(user_uid, *args, **kwargs)
+    return decorated_function
+
+def get_transactions_data(user_uid: str = None) -> List[Dict[str, Any]]:
+    """Retrieve transactions from Firestore for a specific user or all users"""
     global db
     if not db:
         if not initialize_firebase():
             return []
     
     try:
-        transactions_ref = db.collection('transactions')
+        if user_uid:
+            # Get user-specific transactions
+            transactions_ref = db.collection('users').document(user_uid).collection('transactions')
+        else:
+            # Get all transactions (fallback for training)
+            transactions_ref = db.collection('transactions')
+        
         docs = transactions_ref.stream()
         
         transactions = []
@@ -119,92 +155,91 @@ def train_expense_model(df: pd.DataFrame):
         print(f"Error training model: {e}")
         return False
 
-def predict_future_expenses(days_ahead: int = 30) -> List[Dict[str, Any]]:
-    """Predict future expenses for the next N days"""
+def predict_next_month_expense(user_uid: str) -> float:
+    """Predict next month's total expense for a specific user"""
     global expense_model, category_encoder
     
-    if not expense_model:
-        return []
+    # Get user's transaction data
+    transactions = get_transactions_data(user_uid)
+    if not transactions:
+        return 0.0
     
-    predictions = []
-    current_date = datetime.now()
-    
-    # Get historical data to determine common categories
-    transactions = get_transactions_data()
     df = prepare_data_for_ml(transactions)
+    if df.empty or len(df) < 3:
+        return 0.0
     
-    if df.empty:
-        return []
-    
-    # Get most common categories
-    common_categories = df['category'].value_counts().head(5).index.tolist()
+    # Train model with user's data
+    train_success = train_expense_model(df)
+    if not train_success or not expense_model:
+        return 0.0
     
     try:
-        for i in range(days_ahead):
-            future_date = current_date + timedelta(days=i+1)
+        # Calculate next month's prediction
+        next_month = datetime.now() + timedelta(days=30)
+        total_prediction = 0.0
+        
+        # Get user's common categories
+        if 'category' in df.columns:
+            common_categories = df['category'].value_counts().head(5).index.tolist()
+        else:
+            common_categories = ['Groceries', 'Transportation', 'Entertainment']
+        
+        for category in common_categories:
+            # Prepare features for prediction
+            features = {
+                'day_of_year': next_month.timetuple().tm_yday,
+                'month_num': next_month.month,
+                'day_of_week': next_month.weekday()
+            }
             
-            for category in common_categories:
-                # Prepare features for prediction
-                features = {
-                    'day_of_year': future_date.timetuple().tm_yday,
-                    'month_num': future_date.month,
-                    'day_of_week': future_date.weekday()
-                }
-                
-                if category_encoder:
-                    try:
-                        category_encoded = category_encoder.transform([category])[0]
-                        features['category_encoded'] = category_encoded
-                    except:
-                        features['category_encoded'] = 0
-                
-                # Make prediction
-                X_pred = np.array([list(features.values())])
-                predicted_amount = expense_model.predict(X_pred)[0]
-                
-                # Only include meaningful predictions (positive amounts)
-                if predicted_amount > 0:
-                    prediction = {
-                        'date': future_date.strftime('%Y-%m-%d'),
-                        'day': future_date.strftime('%Y-%m-%d'),
-                        'month': future_date.strftime('%B'),
-                        'week': f"Week {future_date.isocalendar()[1]}",
-                        'category': category,
-                        'predicted_amount': round(predicted_amount, 2),
-                        'description': f"Predicted {category} expense",
-                        'type': 'prediction'
-                    }
-                    predictions.append(prediction)
+            if category_encoder:
+                try:
+                    category_encoded = category_encoder.transform([category])[0]
+                    features['category_encoded'] = category_encoded
+                except:
+                    features['category_encoded'] = 0
+            
+            # Make prediction
+            X_pred = np.array([list(features.values())])
+            predicted_amount = expense_model.predict(X_pred)[0]
+            
+            if predicted_amount > 0:
+                total_prediction += predicted_amount
+        
+        # If no prediction was made, use average spending
+        if total_prediction == 0 and 'amount' in df.columns:
+            monthly_avg = df['amount'].mean() * 30  # Daily average * 30 days
+            total_prediction = monthly_avg
+        
+        return round(total_prediction, 2)
     
     except Exception as e:
-        print(f"Error making predictions: {e}")
-    
-    return predictions
+        print(f"Error making prediction: {e}")
+        return 0.0
 
-def store_predictions_to_firestore(predictions: List[Dict[str, Any]]) -> bool:
-    """Store predictions back to Firestore"""
+def store_prediction_to_firestore(user_uid: str, predicted_expense: float) -> bool:
+    """Store user's prediction back to Firestore"""
     global db
     
-    if not db or not predictions:
+    if not db or predicted_expense <= 0:
         return False
     
     try:
-        # Create a predictions collection
-        predictions_ref = db.collection('predictions')
+        # Store in user's prediction subcollection
+        prediction_data = {
+            'predicted_expense': predicted_expense,
+            'created_at': datetime.now(),
+            'month': datetime.now().strftime('%B %Y')
+        }
         
-        # Clear existing predictions
-        existing_predictions = predictions_ref.stream()
-        for doc in existing_predictions:
-            doc.reference.delete()
+        # Store in users/{uid}/prediction/next_month document
+        prediction_ref = db.collection('users').document(user_uid).collection('prediction').document('next_month')
+        prediction_ref.set(prediction_data)
         
-        # Store new predictions
-        for prediction in predictions:
-            predictions_ref.add(prediction)
-        
-        print(f"Stored {len(predictions)} predictions to Firestore")
+        print(f"Stored prediction {predicted_expense} for user {user_uid}")
         return True
     except Exception as e:
-        print(f"Error storing predictions: {e}")
+        print(f"Error storing prediction: {e}")
         return False
 
 @app.route('/', methods=['GET'])
@@ -222,8 +257,9 @@ def home():
     })
 
 @app.route('/transactions', methods=['GET'])
-def get_transactions():
-    """Get all transactions from Firestore"""
+@require_auth
+def get_transactions(user_uid):
+    """Get user's transactions from Firestore"""
     try:
         if not db:
             return jsonify({
@@ -231,10 +267,11 @@ def get_transactions():
                 "error": "Firebase not initialized. Please configure Firebase credentials."
             }), 503
         
-        transactions = get_transactions_data()
+        transactions = get_transactions_data(user_uid)
         return jsonify({
             "success": True,
             "count": len(transactions),
+            "user_uid": user_uid,
             "transactions": transactions
         })
     except Exception as e:
@@ -244,8 +281,9 @@ def get_transactions():
         }), 500
 
 @app.route('/train', methods=['GET'])
-def train_model():
-    """Train the expense prediction model"""
+@require_auth
+def train_model(user_uid):
+    """Train the expense prediction model for a specific user"""
     try:
         if not db:
             return jsonify({
@@ -253,11 +291,11 @@ def train_model():
                 "error": "Firebase not initialized. Please configure Firebase credentials."
             }), 503
         
-        transactions = get_transactions_data()
+        transactions = get_transactions_data(user_uid)
         if not transactions:
             return jsonify({
                 "success": False,
-                "error": "No transaction data found"
+                "error": "No transaction data found for this user"
             }), 400
         
         df = prepare_data_for_ml(transactions)
@@ -267,6 +305,7 @@ def train_model():
             return jsonify({
                 "success": True,
                 "message": "Model trained successfully",
+                "user_uid": user_uid,
                 "data_points": len(df)
             })
         else:
@@ -281,8 +320,9 @@ def train_model():
         }), 500
 
 @app.route('/predictions', methods=['GET'])
-def get_predictions():
-    """Get existing predictions from Firestore"""
+@require_auth
+def get_predictions(user_uid):
+    """Get user's existing predictions from Firestore"""
     global db
     
     try:
@@ -292,20 +332,26 @@ def get_predictions():
                 "error": "Firebase not initialized. Please configure Firebase credentials."
             }), 503
         
-        predictions_ref = db.collection('predictions')
-        docs = predictions_ref.stream()
+        # Get user's prediction
+        prediction_ref = db.collection('users').document(user_uid).collection('prediction').document('next_month')
+        doc = prediction_ref.get()
         
-        predictions = []
-        for doc in docs:
+        if doc.exists:
             prediction_data = doc.to_dict()
-            prediction_data['id'] = doc.id
-            predictions.append(prediction_data)
-        
-        return jsonify({
-            "success": True,
-            "count": len(predictions),
-            "predictions": predictions
-        })
+            return jsonify({
+                "success": True,
+                "user_uid": user_uid,
+                "predicted_expense": prediction_data.get('predicted_expense', 0),
+                "month": prediction_data.get('month', ''),
+                "created_at": prediction_data.get('created_at')
+            })
+        else:
+            return jsonify({
+                "success": True,
+                "user_uid": user_uid,
+                "predicted_expense": None,
+                "message": "No predictions found for this user"
+            })
     except Exception as e:
         return jsonify({
             "success": False,
@@ -313,8 +359,9 @@ def get_predictions():
         }), 500
 
 @app.route('/predict', methods=['POST'])
-def generate_predictions():
-    """Generate new expense predictions and store them"""
+@require_auth
+def generate_predictions(user_uid):
+    """Generate new expense prediction for user and store it"""
     try:
         if not db:
             return jsonify({
@@ -322,45 +369,24 @@ def generate_predictions():
                 "error": "Firebase not initialized. Please configure Firebase credentials."
             }), 503
         
-        # Get parameters from request
-        data = request.get_json() or {}
-        days_ahead = data.get('days_ahead', 30)
+        # Generate prediction for next month
+        predicted_expense = predict_next_month_expense(user_uid)
         
-        # First, train the model with latest data
-        transactions = get_transactions_data()
-        if not transactions:
+        if predicted_expense <= 0:
             return jsonify({
                 "success": False,
-                "error": "No transaction data found for training"
+                "error": "Not enough data to generate prediction. Please add more transactions."
             }), 400
         
-        df = prepare_data_for_ml(transactions)
-        model_trained = train_expense_model(df)
-        
-        if not model_trained:
-            return jsonify({
-                "success": False,
-                "error": "Failed to train prediction model"
-            }), 500
-        
-        # Generate predictions
-        predictions = predict_future_expenses(days_ahead)
-        
-        if not predictions:
-            return jsonify({
-                "success": False,
-                "error": "No predictions could be generated"
-            }), 400
-        
-        # Store predictions to Firestore
-        stored = store_predictions_to_firestore(predictions)
+        # Store prediction to Firestore
+        stored = store_prediction_to_firestore(user_uid, predicted_expense)
         
         return jsonify({
             "success": True,
-            "message": "Predictions generated and stored successfully",
-            "prediction_count": len(predictions),
-            "stored_to_firestore": stored,
-            "predictions": predictions[:10]  # Return first 10 predictions
+            "message": "Prediction generated and stored successfully",
+            "user_uid": user_uid,
+            "predicted_expense": predicted_expense,
+            "stored_to_firestore": stored
         })
     except Exception as e:
         return jsonify({
