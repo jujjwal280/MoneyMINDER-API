@@ -93,9 +93,14 @@ def get_user_transactions(uid: str) -> List[Dict[str, Any]]:
                     date = pd.to_datetime(date)
                 
                 transactions.append({
+                    "id": doc.id,
                     "amount": float(data['amount']),
-                    "date": date,
-                    "category": data.get('category', 'Other')
+                    "date": date.isoformat() if hasattr(date, 'isoformat') else str(date),
+                    "category": data.get('category', 'Other'),
+                    "description": data.get('description', ''),
+                    "day": data.get('day', ''),
+                    "month": data.get('month', ''),
+                    "week": data.get('week', '')
                 })
         
         print(f"📊 Found {len(transactions)} transactions for user {uid}")
@@ -242,15 +247,104 @@ def home(user_uid):
         return predict_expense(user_uid)
     
     return jsonify({
-        "message": "🚀 Expense Prediction API - FIXED VERSION",
+        "message": "🚀 Expense Prediction API - WORKING VERSION",
         "user": user_uid,
-        "status": "ready"
+        "status": "ready",
+        "endpoints": [
+            "GET /transactions - Get user transactions",
+            "POST /predict - Generate prediction", 
+            "GET /predictions - Get stored predictions",
+            "GET /health - Health check"
+        ]
     })
+
+@app.route('/transactions', methods=['GET'])
+@require_auth  
+def get_transactions(user_uid):
+    """Get user's transactions - FOR FLUTTER APP"""
+    try:
+        print(f"🔍 FETCHING transactions for user: {user_uid}")
+        
+        # Ensure Firebase is connected
+        if not db:
+            if not initialize_firebase():
+                return jsonify({
+                    "success": False,
+                    "error": "Firebase connection failed"
+                }), 503
+        
+        # Get user transactions
+        transactions = get_user_transactions(user_uid)
+        
+        print(f"📊 Returning {len(transactions)} transactions")
+        
+        return jsonify({
+            "success": True,
+            "user_uid": user_uid,
+            "count": len(transactions),
+            "transactions": transactions
+        })
+        
+    except Exception as e:
+        print(f"❌ Error fetching transactions for {user_uid}: {e}")
+        return jsonify({
+            "success": False,
+            "error": f"Failed to fetch transactions: {str(e)}"
+        }), 500
+
+@app.route('/predictions', methods=['GET'])
+@require_auth
+def get_predictions(user_uid):
+    """Get user's stored predictions - FOR FLUTTER APP"""
+    try:
+        print(f"🔍 FETCHING predictions for user: {user_uid}")
+        
+        if not db:
+            if not initialize_firebase():
+                return jsonify({
+                    "success": False,
+                    "error": "Firebase connection failed"
+                }), 503
+        
+        # Get user's prediction
+        prediction_ref = db.collection('users').document(user_uid).collection('prediction').document('next_month')
+        doc = prediction_ref.get()
+        
+        if doc.exists:
+            prediction_data = doc.to_dict()
+            predicted_expense = prediction_data.get('predicted_expense', 0)
+            
+            print(f"📊 Found prediction: {predicted_expense}")
+            
+            return jsonify({
+                "success": True,
+                "user_uid": user_uid,
+                "predicted_expense": predicted_expense,
+                "month": prediction_data.get('month', ''),
+                "created_at": prediction_data.get('timestamp', ''),
+                "has_prediction": True
+            })
+        else:
+            print(f"❌ No prediction found for user {user_uid}")
+            return jsonify({
+                "success": True,
+                "user_uid": user_uid,
+                "predicted_expense": None,
+                "has_prediction": False,
+                "message": "No predictions found for this user"
+            })
+            
+    except Exception as e:
+        print(f"❌ Error fetching predictions for {user_uid}: {e}")
+        return jsonify({
+            "success": False,
+            "error": f"Failed to fetch predictions: {str(e)}"
+        }), 500
 
 @app.route('/predict', methods=['POST'])
 @require_auth
 def predict_expense(user_uid):
-    """Generate prediction and store to Firestore"""
+    """Generate prediction and store to Firestore - FOR FLUTTER APP"""
     try:
         print(f"🔥 PREDICTION REQUEST for user: {user_uid}")
         
@@ -324,24 +418,16 @@ def health():
     return jsonify({
         "status": "healthy",
         "firebase_connected": db is not None,
-        "timestamp": datetime.now().isoformat()
+        "timestamp": datetime.now().isoformat(),
+        "endpoints_available": [
+            "GET /transactions",
+            "POST /predict", 
+            "GET /predictions",
+            "GET /health"
+        ]
     })
 
-@app.route('/test-storage/<user_id>', methods=['POST'])
-def test_storage(user_id):
-    """Test Firestore storage directly"""
-    try:
-        test_amount = 5000.0
-        success = store_prediction_to_firestore(user_id, test_amount)
-        return jsonify({
-            "test_user": user_id,
-            "test_amount": test_amount,
-            "storage_success": success
-        })
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
 if __name__ == '__main__':
-    print("🚀 Starting FIXED Expense Prediction API...")
+    print("🚀 Starting WORKING Expense Prediction API...")
     initialize_firebase()
     app.run(host='0.0.0.0', port=5000, debug=True)
