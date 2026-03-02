@@ -1,0 +1,1 @@
+{"file_contents":{"main.py":{"content":"","size_bytes":0},"pyproject.toml":{"content":"[project]\nname = \"python-template\"\nversion = \"0.1.0\"\ndescription = \"\"\nauthors = [\"Your Name <you@example.com>\"]\nrequires-python = \">=3.11\"\ndependencies = [\n    \"firebase-admin>=7.1.0\",\n    \"flask>=3.1.2\",\n    \"pandas>=2.3.2\",\n]\n","size_bytes":228}},"version":1}
