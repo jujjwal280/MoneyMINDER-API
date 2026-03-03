@@ -81,6 +81,8 @@ def ensure_db():
         initialize_firebase()
     return db is not None
 
+initialize_firebase()
+
 def verify_firebase_token(token: str) -> Optional[str]:
     try:
         decoded = auth.verify_id_token(token)
@@ -375,6 +377,7 @@ def predict_expense(user_uid):
 
 @app.route('/health', methods=['GET'])
 def health_check():
+    ensure_db()  # 👈 add this line
     return jsonify({
         'status': 'healthy',
         'firebase_connected': db is not None,
