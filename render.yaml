@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: expense-prediction-api
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn main:app --workers 2 --threads 2 --timeout 120
+    plan: free
+    envVars:
+      - key: FIREBASE_KEY
+        sync: false       # You'll paste this manually in Render dashboard
+      - key: FLASK_DEBUG
+        value: false
