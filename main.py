@@ -60,7 +60,7 @@ def initialize_firebase() -> bool:
     try:
         firebase_key = os.environ.get('FIREBASE_KEY')
         if not firebase_key:
-            print("⚠️ FIREBASE_KEY not found. Running in mock-data mode.")
+            print("⚠️ FIREBASE_KEY not found.")
             return False
         service_account_info = json.loads(firebase_key)
         cred = credentials.Certificate(service_account_info)
@@ -68,9 +68,24 @@ def initialize_firebase() -> bool:
         db = firestore.client()
         print("✅ Firebase initialized")
         return True
-    except Exception as e:
-        print(f"⚠️ Error initializing Firebase: {e}")
+    except json.JSONDecodeError as e:
+        print(f"❌ JSON parse error: {e}")
         return False
+    except ValueError as e:
+        print(f"❌ Invalid credential: {e}")
+        return False
+    except Exception as e:
+        print(f"❌ Firebase init error — type: {type(e).__name__}, message: {e}")
+        return False
+    
+@app.route('/debug-init', methods=['GET'])
+def debug_init():
+    result = initialize_firebase()
+    return jsonify({
+        'init_result': result,
+        'firebase_connected': db is not None,
+        'apps_initialized': len(firebase_admin._apps)
+    })
 
 def verify_firebase_token(token: str) -> Optional[str]:
     try:
