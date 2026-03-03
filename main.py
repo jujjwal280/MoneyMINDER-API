@@ -13,12 +13,12 @@ import warnings
 from datetime import datetime, timedelta
 from functools import wraps
 from typing import List, Dict, Any, Optional
-
 import numpy as np
 import pandas as pd
 import firebase_admin
 from firebase_admin import auth, credentials, firestore
 from flask import Flask, jsonify, request
+from flask_cors import CORS # <--- ADD THIS LINE
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.linear_model import LinearRegression
 from sklearn.preprocessing import MinMaxScaler
@@ -36,6 +36,7 @@ CONFIG = {
 app = Flask(__name__)
 db: Optional[firestore.Client] = None
 model_cache: Dict[str, Any] = {}
+CORS(app) # <--- ADD THIS LINE
 
 # -------------------------- Firebase helpers --------------------------
 def initialize_firebase() -> bool:
