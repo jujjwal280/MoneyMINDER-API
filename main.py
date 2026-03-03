@@ -13,7 +13,7 @@ import warnings
 from datetime import datetime, timedelta
 from functools import wraps
 from typing import List, Dict, Any, Optional
-
+from flask_cors import CORS
 import numpy as np
 import pandas as pd
 import firebase_admin
@@ -47,6 +47,7 @@ CONFIG = {
 
 # -------------------------- Flask + Globals --------------------------
 app = Flask(__name__)
+
 db: Optional[firestore.Client] = None
 model_cache: Dict[str, Any] = {}
 
