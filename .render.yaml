@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: moneyminder-api
+    runtime: python
+    plan: free
+    buildCommand: |
+      python -m pip install --upgrade pip setuptools wheel
+      pip install -r requirements.txt
+    startCommand: gunicorn main:app
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
