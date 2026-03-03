@@ -47,7 +47,7 @@ CONFIG = {
 
 # -------------------------- Flask + Globals --------------------------
 app = Flask(__name__)
-
+CORS(app) 
 db: Optional[firestore.Client] = None
 model_cache: Dict[str, Any] = {}
 
