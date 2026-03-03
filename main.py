@@ -315,6 +315,27 @@ def store_prediction_to_firestore(user_uid: str, predicted_expense: float) -> bo
         print(f"Error storing prediction: {e}")
         return False
 
+@app.route('/debug-firebase', methods=['GET'])
+def debug_firebase():
+    firebase_key = os.environ.get('FIREBASE_KEY')
+    if not firebase_key:
+        return jsonify({'error': 'FIREBASE_KEY env var is missing entirely'})
+    try:
+        parsed = json.loads(firebase_key)
+        return jsonify({
+            'key_found': True,
+            'key_length': len(firebase_key),
+            'project_id': parsed.get('project_id'),
+            'client_email': parsed.get('client_email'),
+            'type': parsed.get('type')
+        })
+    except json.JSONDecodeError as e:
+        return jsonify({
+            'key_found': True,
+            'json_parse_error': str(e),
+            'first_50_chars': firebase_key[:50]
+        })
+
 # -------------------------- API routes --------------------------
 @app.route('/', methods=['GET'])
 def index():
