@@ -1,12 +1,3 @@
-# expense_prediction_api_with_lstm_max.py
-# Advanced Expense Prediction API (v2.4) - Max Prediction Merge
-# Features:
-#  - ARIMA, RandomForest, Trend, LSTM (optional), Custom Model
-#  - Model caching per-user+data-hash
-#  - Mock-data fallback when Firestore not configured
-#  - Max value prediction across all models
-#  - Endpoints: /, /transactions, /train, /predict, /health
-
 import os
 import json
 import warnings
@@ -24,7 +15,6 @@ from sklearn.linear_model import LinearRegression
 from sklearn.preprocessing import MinMaxScaler
 from statsmodels.tsa.arima.model import ARIMA
 
-# Try importing TensorFlow / Keras. If unavailable, LSTM will be skipped gracefully.
 try:
     import tensorflow as tf
     from tensorflow.keras.models import Sequential
