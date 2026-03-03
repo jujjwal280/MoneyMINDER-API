@@ -1,7 +1,7 @@
-# expense_prediction_api_with_lstm_max.py
-# Advanced Expense Prediction API (v2.4) - Max Prediction Merge
+# expense_prediction_api_lightweight.py
+# Lightweight Expense Prediction API (v2.5) - No TensorFlow
 # Features:
-#  - ARIMA, RandomForest, Trend, LSTM (optional), Custom Model
+#  - ARIMA, RandomForest, Trend, Custom Model
 #  - Model caching per-user+data-hash
 #  - Mock-data fallback when Firestore not configured
 #  - Max value prediction across all models
@@ -24,25 +24,12 @@ from sklearn.linear_model import LinearRegression
 from sklearn.preprocessing import MinMaxScaler
 from statsmodels.tsa.arima.model import ARIMA
 
-# Try importing TensorFlow / Keras. If unavailable, LSTM will be skipped gracefully.
-try:
-    import tensorflow as tf
-    from tensorflow.keras.models import Sequential
-    from tensorflow.keras.layers import LSTM, Dense, Dropout
-    from tensorflow.keras.callbacks import EarlyStopping
-    TF_AVAILABLE = True
-except Exception:
-    TF_AVAILABLE = False
-
 warnings.filterwarnings('ignore')
 
 # -------------------------- Configuration --------------------------
 CONFIG = {
     "ARIMA_ORDERS": [(1, 1, 0), (0, 1, 1), (1, 1, 1), (2, 1, 0), (0, 1, 2)],
     "ML_LOOKBACK_STEPS": 6,
-    "LSTM_LOOKBACK": 6,
-    "LSTM_EPOCHS": 30,
-    "LSTM_BATCH": 8
 }
 
 # -------------------------- Flask + Globals --------------------------
@@ -228,52 +215,6 @@ class PredictionEngine:
         except Exception:
             return None
 
-    def get_lstm_prediction(self) -> Optional[float]:
-        if not TF_AVAILABLE or len(self.monthly_data) < 6:
-            return None
-        cached_model = self._cached('lstm')
-        cached_scaler = self._cached('scaler')
-        values = self.monthly_data.values.reshape(-1,1).astype('float32')
-        if cached_model is None or cached_scaler is None:
-            scaler = MinMaxScaler(feature_range=(0,1))
-            scaled = scaler.fit_transform(values)
-            n_steps = min(6, len(scaled)-1)
-            X, y = [], []
-            for i in range(n_steps, len(scaled)):
-                X.append(scaled[i-n_steps:i,0])
-                y.append(scaled[i,0])
-            if len(X)<3:
-                return None
-            X = np.array(X).reshape((len(X), n_steps,1))
-            y = np.array(y)
-            try:
-                tf.keras.backend.clear_session()
-                model = Sequential()
-                model.add(LSTM(64, input_shape=(X.shape[1], X.shape[2])))
-                model.add(Dropout(0.2))
-                model.add(Dense(16, activation='relu'))
-                model.add(Dense(1))
-                model.compile(optimizer='adam', loss='mse')
-                es = EarlyStopping(monitor='loss', patience=6, restore_best_weights=True, verbose=0)
-                model.fit(X, y, epochs=CONFIG['LSTM_EPOCHS'], batch_size=CONFIG['LSTM_BATCH'], verbose=0, callbacks=[es])
-                self._set_cache('lstm', model)
-                self._set_cache('scaler', scaler)
-                cached_model = model
-                cached_scaler = scaler
-            except Exception as e:
-                print(f"⚠️ LSTM failed: {e}")
-                return None
-        try:
-            scaled = cached_scaler.transform(values)
-            n_steps = min(6, len(scaled)-1)
-            last_seq = scaled[-n_steps:,0].reshape((1,n_steps,1))
-            pred_scaled = cached_model.predict(last_seq, verbose=0)[0,0]
-            pred = cached_scaler.inverse_transform(np.array(pred_scaled).reshape(-1,1))[0,0]
-            return float(pred)
-        except Exception as e:
-            print(f"⚠️ LSTM prediction failed: {e}")
-            return None
-
     # --- Custom model ---
     def get_custom_model_prediction(self) -> Optional[float]:
         if len(self.monthly_data) < 3:
@@ -285,7 +226,6 @@ class PredictionEngine:
         preds = {
             'arima': self.get_arima_prediction(),
             'ml': self.get_ml_prediction(),
-            'lstm': self.get_lstm_prediction(),
             'trend': self.get_trend_prediction(),
             'custom': self.get_custom_model_prediction()
         }
@@ -319,8 +259,8 @@ def store_prediction_to_firestore(user_uid: str, predicted_expense: float) -> bo
 @app.route('/', methods=['GET'])
 def index():
     return jsonify({
-        'message': 'Advanced Expense Prediction API (v2.4 with Max Prediction)',
-        'features': ['ARIMA', 'RandomForest', 'LSTM (optional)', 'Trend', 'Custom Model', 'Max Prediction', 'Model Caching']
+        'message': 'Lightweight Expense Prediction API (v2.5)',
+        'features': ['ARIMA', 'RandomForest', 'Trend', 'Custom Model', 'Max Prediction', 'Model Caching']
     })
 
 @app.route('/transactions', methods=['GET'])
@@ -340,7 +280,6 @@ def train_endpoint(user_uid):
     _ = engine.get_arima_prediction()
     _ = engine.get_ml_prediction()
     _ = engine.get_trend_prediction()
-    _ = engine.get_lstm_prediction()
     _ = engine.get_custom_model_prediction()
     return jsonify({'success': True, 'message': 'Models trained/cached for user', 'data_points': len(monthly)})
 
@@ -369,13 +308,12 @@ def health_check():
     return jsonify({
         'status': 'healthy',
         'firebase_connected': db is not None,
-        'tensorflow_available': TF_AVAILABLE,
         'timestamp': datetime.now().isoformat()
     })
 
 # -------------------------- Main --------------------------
 if __name__ == '__main__':
-    print('Starting Advanced Expense Prediction API (v2.4 with Max Prediction)')
+    print('Starting Lightweight Expense Prediction API (v2.5)')
     initialize_firebase()
     debug_mode = os.environ.get('FLASK_DEBUG', 'false').lower() == 'true'
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)), debug=debug_mode)
