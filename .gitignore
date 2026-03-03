@@ -1,11 +1,8 @@
-# Python
+# Python cache
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
-*.env
-*.egg-info/
-*.egg
 
 # Virtual environment
 venv/
@@ -18,6 +15,9 @@ env/
 *.h5
 *.pkl
 *.joblib
+
+# Environment variables
+*.env
 
 # OS files
 .DS_Store
