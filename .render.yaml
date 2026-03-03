@@ -1,12 +1,7 @@
 services:
   - type: web
-    name: moneyminder-api
-    runtime: python
+    name: expense-prediction-api
+    env: python
     plan: free
-    buildCommand: |
-      python -m pip install --upgrade pip setuptools wheel
-      pip install -r requirements.txt
-    startCommand: gunicorn main:app
-    envVars:
-      - key: PYTHON_VERSION
-        value: 3.11.9
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn expense_prediction_api_with_lstm_max:app --bind 0.0.0.0:$PORT --workers 1 --threads 8
