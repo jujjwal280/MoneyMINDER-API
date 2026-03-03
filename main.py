@@ -53,39 +53,33 @@ model_cache: Dict[str, Any] = {}
 # -------------------------- Firebase helpers --------------------------
 def initialize_firebase() -> bool:
     global db
-    if firebase_admin._apps:
-        db = firestore.client()
-        print("✅ Firebase already initialized")
-        return True
     try:
+        if firebase_admin._apps:
+            # Already initialized — just make sure db client is set
+            if db is None:
+                db = firestore.client()
+                print("✅ Firebase db client recovered from existing app")
+            return True
+        
         firebase_key = os.environ.get('FIREBASE_KEY')
         if not firebase_key:
-            print("⚠️ FIREBASE_KEY not found.")
+            print("⚠️ FIREBASE_KEY not found. Running in mock-data mode.")
             return False
         service_account_info = json.loads(firebase_key)
         cred = credentials.Certificate(service_account_info)
         firebase_admin.initialize_app(cred)
         db = firestore.client()
-        print("✅ Firebase initialized")
+        print("✅ Firebase initialized successfully")
         return True
-    except json.JSONDecodeError as e:
-        print(f"❌ JSON parse error: {e}")
-        return False
-    except ValueError as e:
-        print(f"❌ Invalid credential: {e}")
-        return False
     except Exception as e:
-        print(f"❌ Firebase init error — type: {type(e).__name__}, message: {e}")
+        print(f"❌ Firebase init error — {type(e).__name__}: {e}")
         return False
-    
-@app.route('/debug-init', methods=['GET'])
-def debug_init():
-    result = initialize_firebase()
-    return jsonify({
-        'init_result': result,
-        'firebase_connected': db is not None,
-        'apps_initialized': len(firebase_admin._apps)
-    })
+
+def ensure_db():
+    global db
+    if db is None:
+        initialize_firebase()
+    return db is not None
 
 def verify_firebase_token(token: str) -> Optional[str]:
     try:
@@ -111,7 +105,7 @@ def require_auth(f):
 # -------------------------- Data retrieval & preparation --------------------------
 def get_user_transactions(uid: str) -> List[Dict[str, Any]]:
     global db
-    if not db:  # deterministic mock based on uid
+    if not ensure_db():  # deterministic mock based on uid
         np.random.seed(int(uid.__hash__() & 0xffffffff))
         mock = []
         base = datetime.now()
@@ -329,27 +323,6 @@ def store_prediction_to_firestore(user_uid: str, predicted_expense: float) -> bo
     except Exception as e:
         print(f"Error storing prediction: {e}")
         return False
-
-@app.route('/debug-firebase', methods=['GET'])
-def debug_firebase():
-    firebase_key = os.environ.get('FIREBASE_KEY')
-    if not firebase_key:
-        return jsonify({'error': 'FIREBASE_KEY env var is missing entirely'})
-    try:
-        parsed = json.loads(firebase_key)
-        return jsonify({
-            'key_found': True,
-            'key_length': len(firebase_key),
-            'project_id': parsed.get('project_id'),
-            'client_email': parsed.get('client_email'),
-            'type': parsed.get('type')
-        })
-    except json.JSONDecodeError as e:
-        return jsonify({
-            'key_found': True,
-            'json_parse_error': str(e),
-            'first_50_chars': firebase_key[:50]
-        })
 
 # -------------------------- API routes --------------------------
 @app.route('/', methods=['GET'])
