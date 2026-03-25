@@ -64,7 +64,7 @@ def initialize_firebase() -> bool:
     try:
         firebase_key = os.environ.get("FIREBASE_KEY")
         if not firebase_key:
-            print("⚠️ FIREBASE_KEY not found. Running in mock-data mode.")
+            print("⚠️ FIREBASE_KEY not found → AUTH DISABLED (mock mode)")
             return False
         service_account_info = json.loads(firebase_key)
         cred = credentials.Certificate(service_account_info)
@@ -76,28 +76,38 @@ def initialize_firebase() -> bool:
         print(f"⚠️ Error initializing Firebase: {e}")
         return False
 
-
 def verify_firebase_token(token: str) -> Optional[str]:
     try:
         decoded = auth.verify_id_token(token)
+        print("✅ UID:", decoded.get("uid"))
         return decoded.get("uid")
     except Exception as e:
-        print(f"Token verification error: {e}")
+        print("❌ TOKEN ERROR:", e)
         return None
-
 
 def require_auth(f):
     @wraps(f)
     def wrapper(*args, **kwargs):
+
+        # 🔥 FIX: Skip auth if Firebase not initialized (mock mode)
+        if db is None:
+            print("⚠️ Mock mode: skipping auth")
+            return f("mock_user", *args, **kwargs)
+
         auth_header = request.headers.get("Authorization")
+
         if not auth_header or not auth_header.startswith("Bearer "):
             return jsonify(
                 {"success": False, "error": "Authorization header required"}
             ), 401
+
         token = auth_header.split("Bearer ")[1]
+
         uid = verify_firebase_token(token)
+
         if not uid:
             return jsonify({"success": False, "error": "Invalid token"}), 401
+
         return f(uid, *args, **kwargs)
 
     return wrapper
