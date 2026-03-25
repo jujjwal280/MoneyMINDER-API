@@ -50,9 +50,9 @@ CONFIG = {
 # -------------------------- Flask + Globals --------------------------
 app = Flask(__name__)
 CORS(app)
+
 db: Optional[firestore.Client] = None
 model_cache: Dict[str, Any] = {}
-
 
 # -------------------------- Firebase helpers --------------------------
 def initialize_firebase() -> bool:
@@ -75,6 +75,8 @@ def initialize_firebase() -> bool:
     except Exception as e:
         print(f"⚠️ Error initializing Firebase: {e}")
         return False
+    
+initialize_firebase()  # 🔥 MUST be here for Gunicorn
 
 def verify_firebase_token(token: str) -> Optional[str]:
     try:
@@ -372,17 +374,6 @@ def store_prediction_to_firestore(user_uid: str, predicted_expense: float) -> bo
         print(f"Error storing prediction: {e}")
         return False
 
-
-def verify_firebase_token(token: str) -> Optional[str]:
-    try:
-        decoded = auth.verify_id_token(token)
-        print("✅ UID:", decoded.get("uid"))
-        return decoded.get("uid")
-    except Exception as e:
-        print("❌ TOKEN ERROR:", e)
-        return None
-
-
 # -------------------------- API routes --------------------------
 @app.route("/", methods=["GET"])
 def index():
@@ -483,7 +474,9 @@ def health_check():
 
 # -------------------------- Main --------------------------
 if __name__ == "__main__":
-    print("Starting Advanced Expense Prediction API (v2.4 with Max Prediction)")
+    print("Starting Advanced Expense Prediction API")
+
     initialize_firebase()
-    debug_mode = os.environ.get("FLASK_DEBUG", "false").lower() == "true"
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)), debug=debug_mode)
+
+    port = int(os.environ.get("PORT", 10000))  # 🔥 FIX
+    app.run(host="0.0.0.0", port=port)
