@@ -1,310 +1,1134 @@
-# -------------------------- Optimized Expense Prediction API v2.5 --------------------------
 import os
 import json
 import warnings
 from datetime import datetime, timedelta
 from functools import wraps
-from threading import Thread
 from typing import List, Dict, Any, Optional
 
 import numpy as np
 import pandas as pd
+
 import firebase_admin
-from firebase_admin import auth, credentials, firestore
+from firebase_admin import credentials, firestore, auth
+
 from flask import Flask, jsonify, request
-from sklearn.ensemble import RandomForestRegressor
-from sklearn.linear_model import LinearRegression
-from sklearn.preprocessing import MinMaxScaler
-from statsmodels.tsa.arima.model import ARIMA
 from flask_cors import CORS
 
-# TensorFlow (optional)
-try:
-    import tensorflow as tf
-    from tensorflow.keras.models import Sequential
-    from tensorflow.keras.layers import LSTM, Dense, Dropout
-    from tensorflow.keras.callbacks import EarlyStopping
-    TF_AVAILABLE = True
-except Exception:
-    TF_AVAILABLE = False
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.linear_model import LinearRegression
+
+from statsmodels.tsa.arima.model import ARIMA
+
 
 warnings.filterwarnings("ignore")
 
-# -------------------------- Configuration --------------------------
+
+# ==========================================================
+# CONFIGURATION
+# ==========================================================
+
 CONFIG = {
-    "ARIMA_ORDERS": [(1, 1, 0), (0, 1, 1), (1, 1, 1), (2, 1, 0), (0, 1, 2)],
-    "ML_LOOKBACK_STEPS": 6,
-    "LSTM_LOOKBACK": 6,
-    "LSTM_EPOCHS": 30,
-    "LSTM_BATCH": 8,
+    "ARIMA_ORDERS": [
+        (1,1,0),
+        (0,1,1)
+    ],
+    "ML_LOOKBACK_STEPS": 6
 }
 
-# -------------------------- Flask + Globals --------------------------
+
+# ==========================================================
+# FLASK SETUP
+# ==========================================================
+
 app = Flask(__name__)
 CORS(app)
 
+
 db: Optional[firestore.Client] = None
+
+
+# Model cache
 model_cache: Dict[str, Any] = {}
 
-# -------------------------- Firebase Helpers --------------------------
-def initialize_firebase() -> bool:
+# Prediction cache
+prediction_cache: Dict[str, float] = {}
+
+MAX_CACHE_USERS = 20
+
+
+
+# ==========================================================
+# FIREBASE INITIALIZATION
+# ==========================================================
+
+def initialize_firebase():
+
     global db
-    if firebase_admin._apps:
-        db = firestore.client()
-        return True
+
     try:
+
+        if firebase_admin._apps:
+            db = firestore.client()
+            print("Firebase already initialized")
+            return True
+
+
         firebase_key = os.environ.get("FIREBASE_KEY")
+
+
         if not firebase_key:
-            print("⚠️ FIREBASE_KEY not found → AUTH DISABLED (mock mode)")
+
+            print(
+                "Firebase key missing. Running mock mode"
+            )
+
             return False
-        service_account_info = json.loads(firebase_key)
-        cred = credentials.Certificate(service_account_info)
-        firebase_admin.initialize_app(cred)
+
+
+
+        firebase_json = json.loads(firebase_key)
+
+
+        cred = credentials.Certificate(firebase_json)
+
+        firebase_admin.initialize_app(
+            cred
+        )
+
+
         db = firestore.client()
+
+
+        print(
+            "Firebase connected successfully"
+        )
+
+
         return True
+
+
+
     except Exception as e:
-        print(f"⚠️ Firebase init error: {e}")
+
+        print(
+            "Firebase error:",
+            e
+        )
+
         return False
+
+
 
 initialize_firebase()
 
-def verify_firebase_token(token: str) -> Optional[str]:
+
+
+# ==========================================================
+# AUTH
+# ==========================================================
+
+
+def verify_token(token):
+
     try:
-        decoded = auth.verify_id_token(token)
+
+        decoded = auth.verify_id_token(
+            token
+        )
+
         return decoded.get("uid")
+
+
     except Exception as e:
-        print(f"❌ TOKEN ERROR: {e}")
+
+        print(
+            "Token error:",
+            e
+        )
+
         return None
 
-def require_auth(f):
-    @wraps(f)
+
+
+
+def require_auth(function):
+
+    @wraps(function)
     def wrapper(*args, **kwargs):
-        if db is None:  # mock mode
-            return f("mock_user", *args, **kwargs)
-        auth_header = request.headers.get("Authorization")
-        if not auth_header or not auth_header.startswith("Bearer "):
-            return jsonify({"success": False, "error": "Authorization required"}), 401
-        token = auth_header.split("Bearer ")[1]
-        uid = verify_firebase_token(token)
+
+
+        # Render testing mode
+        if db is None:
+
+            return function(
+                "mock_user",
+                *args,
+                **kwargs
+            )
+
+
+
+        header = request.headers.get(
+            "Authorization"
+        )
+
+
+        if not header:
+
+            return jsonify(
+                {
+                    "success":False,
+                    "error":"Authorization required"
+                }
+            ),401
+
+
+
+        token = header.replace(
+            "Bearer ",
+            ""
+        )
+
+
+        uid = verify_token(
+            token
+        )
+
+
         if not uid:
-            return jsonify({"success": False, "error": "Invalid token"}), 401
-        return f(uid, *args, **kwargs)
+
+            return jsonify(
+                {
+                    "success":False,
+                    "error":"Invalid token"
+                }
+            ),401
+
+
+
+        return function(
+            uid,
+            *args,
+            **kwargs
+        )
+
+
     return wrapper
 
-# -------------------------- Data Retrieval --------------------------
-def get_user_transactions(uid: str) -> List[Dict[str, Any]]:
-    if not db:
-        # deterministic mock
-        np.random.seed(abs(hash(uid)) & 0xFFFFFFFF)
-        mock = []
-        base = datetime.now()
+
+
+
+
+# ==========================================================
+# DATA FETCH
+# ==========================================================
+
+
+def get_user_transactions(uid):
+
+
+    if db is None:
+
+
+        np.random.seed(
+            abs(hash(uid))
+            &
+            0xffffffff
+        )
+
+
+        data=[]
+
+        now=datetime.now()
+
+
+
         for i in range(24):
-            date = (base - pd.DateOffset(months=i)).replace(day=1)
-            amount = max(500, np.random.randint(3000, 8000) + np.random.normal(0, 600))
-            mock.append({"amount": float(amount), "date": date, "category": np.random.choice(["Groceries", "Transport", "Entertainment", "Utilities"])})
-        return mock
+
+            date = (
+                now -
+                pd.DateOffset(months=i)
+            ).replace(day=1)
+
+
+            amount=float(
+                np.random.randint(
+                    3000,
+                    8000
+                )
+            )
+
+
+            data.append(
+                {
+                    "amount":amount,
+                    "date":date,
+                    "category":"Other"
+                }
+            )
+
+
+        return data
+
+
+
     try:
-        ref = db.collection("users").document(uid).collection("transactions")
-        docs = ref.stream()
-        transactions = []
-        for d in docs:
-            data = d.to_dict()
-            if "amount" in data and "date" in data:
-                date = data["date"]
-                if hasattr(date, "seconds"):
-                    date = datetime.fromtimestamp(date.seconds)
-                elif isinstance(date, str):
-                    date = pd.to_datetime(date)
-                transactions.append({"amount": float(data["amount"]), "date": date, "category": data.get("category", "Other")})
-        return transactions
+
+
+        docs = (
+            db.collection("users")
+            .document(uid)
+            .collection("transactions")
+            .stream()
+        )
+
+
+        result=[]
+
+
+        for doc in docs:
+
+
+            d=doc.to_dict()
+
+
+            if (
+                "amount" in d
+                and
+                "date" in d
+            ):
+
+
+                date=d["date"]
+
+
+                if hasattr(
+                    date,
+                    "seconds"
+                ):
+
+                    date=datetime.fromtimestamp(
+                        date.seconds
+                    )
+
+
+                result.append(
+                    {
+                        "amount":
+                        float(
+                            d["amount"]
+                        ),
+
+                        "date":
+                        date,
+
+                        "category":
+                        d.get(
+                            "category",
+                            "Other"
+                        )
+                    }
+                )
+
+
+        return result
+
+
+
     except Exception as e:
-        print(f"Error fetching transactions: {e}")
+
+
+        print(
+            "Firestore fetch error:",
+            e
+        )
+
+
         return []
 
-def prepare_monthly_data(transactions: List[Dict[str, Any]]) -> Optional[pd.Series]:
+
+
+
+
+def prepare_monthly_data(
+        transactions
+):
+
+
     if not transactions:
+
         return None
-    df = pd.DataFrame(transactions)
-    df["date"] = pd.to_datetime(df["date"])
-    df.set_index("date", inplace=True)
-    monthly = df["amount"].resample("MS").sum().sort_index()
-    return monthly[monthly > 0] if not monthly.empty else None
 
-# -------------------------- Prediction Helpers --------------------------
-def best_arima_forecast(series: pd.Series) -> Optional[float]:
-    best_aic, best_pred = float("inf"), None
+
+
+    df=pd.DataFrame(
+        transactions
+    )
+
+
+    df["date"]=pd.to_datetime(
+        df["date"]
+    )
+
+
+    df.set_index(
+        "date",
+        inplace=True
+    )
+
+
+    monthly=(
+        df["amount"]
+        .resample("MS")
+        .sum()
+        .sort_index()
+    )
+
+
+    return monthly[monthly>0]
+
+
+
+
+
+# ==========================================================
+# MODELS
+# ==========================================================
+
+
+def arima_prediction(series):
+
+
+    best=None
+    best_aic=float("inf")
+
+
+
     for order in CONFIG["ARIMA_ORDERS"]:
-        try:
-            m = ARIMA(series, order=order).fit()
-            if m.aic < best_aic:
-                best_aic = m.aic
-                best_pred = float(m.forecast(steps=1).iloc[0])
-        except Exception:
-            continue
-    return best_pred
 
-# -------------------------- Prediction Engine --------------------------
+        try:
+
+            model=ARIMA(
+                series,
+                order=order
+            ).fit()
+
+
+            if model.aic < best_aic:
+
+                best_aic=model.aic
+
+                best=float(
+                    model.forecast(
+                        1
+                    ).iloc[0]
+                )
+
+
+        except:
+
+            continue
+
+
+
+    return best
+# ==========================================================
+# PREDICTION ENGINE
+# ==========================================================
+
 class PredictionEngine:
-    def __init__(self, monthly_data: pd.Series, user_uid: str):
+
+
+    def __init__(self, monthly_data, uid):
+
         self.monthly_data = monthly_data
-        self.user_uid = user_uid
-        self.data_hash = int(pd.util.hash_pandas_object(monthly_data).sum())
-        self.cache_key = f"{user_uid}_{self.data_hash}"
+        self.uid = uid
+
+
+        self.cache_key = (
+            uid +
+            "_" +
+            str(
+                int(
+                    pd.util
+                    .hash_pandas_object(monthly_data)
+                    .sum()
+                )
+            )
+        )
+
+
         if self.cache_key not in model_cache:
+
             model_cache[self.cache_key] = {}
 
-    def _cached(self, name: str):
+
+
+
+    def cached(self,name):
+
         return model_cache[self.cache_key].get(name)
 
-    def _set_cache(self, name: str, value: Any):
-        model_cache[self.cache_key][name] = value
 
-    def get_arima_prediction(self) -> Optional[float]:
-        if self._cached("arima"):
-            return self._cached("arima")
-        pred = best_arima_forecast(self.monthly_data)
-        if pred: self._set_cache("arima", pred)
+
+
+    def save_cache(self,name,value):
+
+        if len(model_cache) > MAX_CACHE_USERS:
+
+            first=list(model_cache.keys())[0]
+
+            del model_cache[first]
+
+
+        model_cache[self.cache_key][name]=value
+
+
+
+
+
+    # ---------------- ARIMA ----------------
+
+    def get_arima(self):
+
+
+        old=self.cached("arima")
+
+
+        if old:
+
+            return old
+
+
+
+        pred=arima_prediction(
+            self.monthly_data
+        )
+
+
+        if pred:
+
+            self.save_cache(
+                "arima",
+                pred
+            )
+
+
         return pred
 
-    def get_ml_prediction(self) -> Optional[float]:
-        if self._cached("rf"):
-            model = self._cached("rf")
+
+
+
+
+    # ---------------- RANDOM FOREST ----------------
+
+    def get_random_forest(self):
+
+
+        old=self.cached(
+            "rf"
+        )
+
+
+        if old:
+
+            model=old
+
+
         else:
-            values = self.monthly_data.values
-            n_steps = min(CONFIG["ML_LOOKBACK_STEPS"], len(values)-1)
-            if len(values) < 6: return None
-            X, y = [], []
-            for i in range(n_steps, len(values)):
-                X.append(np.concatenate([values[i-n_steps:i], [values[i-n_steps:i].mean()], [values[i-n_steps:i].std()], [values[i-n_steps:i][-1]-values[i-n_steps:i][-2]]]))
-                y.append(values[i])
-            if len(X) < 3: return None
-            X, y = np.array(X), np.array(y)
-            model = RandomForestRegressor(n_estimators=100, random_state=42)
-            model.fit(X, y)
-            self._set_cache("rf", model)
-        last = np.concatenate([self.monthly_data.values[-CONFIG["ML_LOOKBACK_STEPS"]:], 
-                               [self.monthly_data.values[-CONFIG["ML_LOOKBACK_STEPS"]:].mean()], 
-                               [self.monthly_data.values[-CONFIG["ML_LOOKBACK_STEPS"]:].std()],
-                               [self.monthly_data.values[-1]-self.monthly_data.values[-2]]])
+
+
+            values=self.monthly_data.values
+
+
+            if len(values)<6:
+
+                return None
+
+
+
+            X=[]
+            y=[]
+
+
+
+            for i in range(
+                6,
+                len(values)
+            ):
+
+
+                window=values[i-6:i]
+
+
+                X.append(
+                    [
+                        *window,
+                        window.mean(),
+                        window.std(),
+                        window[-1]-window[-2]
+                    ]
+                )
+
+
+                y.append(
+                    values[i]
+                )
+
+
+
+            if len(X)<3:
+
+                return None
+
+
+
+            model=RandomForestRegressor(
+                n_estimators=30,
+                max_depth=5,
+                random_state=42,
+                n_jobs=1
+            )
+
+
+            model.fit(
+                X,
+                y
+            )
+
+
+            self.save_cache(
+                "rf",
+                model
+            )
+
+
+
+        last=self.monthly_data.values[-6:]
+
+
+        features=[
+            *last,
+            last.mean(),
+            last.std(),
+            last[-1]-last[-2]
+        ]
+
+
         try:
-            return float(model.predict([last])[0])
-        except Exception:
+
+            return float(
+                model.predict(
+                    [features]
+                )[0]
+            )
+
+
+        except:
+
             return None
 
-    def get_trend_prediction(self) -> Optional[float]:
-        if self._cached("trend"):
-            model = self._cached("trend")
-        else:
-            X = np.arange(len(self.monthly_data)).reshape(-1,1)
-            y = self.monthly_data.values
-            model = LinearRegression().fit(X, y)
-            self._set_cache("trend", model)
-        return float(model.predict([[len(self.monthly_data)]])[0])
 
-    def get_lstm_prediction(self) -> Optional[float]:
-        if not TF_AVAILABLE or len(self.monthly_data)<6: return None
-        if self._cached("lstm") and self._cached("scaler"):
-            model, scaler = self._cached("lstm"), self._cached("scaler")
+
+
+
+    # ---------------- TREND ----------------
+
+
+    def get_trend(self):
+
+
+        old=self.cached(
+            "trend"
+        )
+
+
+        if old:
+
+            model=old
+
+
         else:
-            # train in background
-            thread_res = {}
-            def train_lstm():
-                values = self.monthly_data.values.reshape(-1,1).astype("float32")
-                scaler = MinMaxScaler(feature_range=(0,1))
-                scaled = scaler.fit_transform(values)
-                X, y = [], []
-                n_steps = min(CONFIG["LSTM_LOOKBACK"], len(scaled)-1)
-                for i in range(n_steps, len(scaled)):
-                    X.append(scaled[i-n_steps:i,0])
-                    y.append(scaled[i,0])
-                if len(X)<3: return
-                X, y = np.array(X).reshape(len(X), n_steps,1), np.array(y)
-                tf.keras.backend.clear_session()
-                model = Sequential([
-                    LSTM(64, input_shape=(X.shape[1], X.shape[2])),
-                    Dropout(0.2),
-                    Dense(16, activation="relu"),
-                    Dense(1)
-                ])
-                model.compile(optimizer="adam", loss="mse")
-                model.fit(X, y, epochs=CONFIG["LSTM_EPOCHS"], batch_size=CONFIG["LSTM_BATCH"], verbose=0, callbacks=[EarlyStopping(monitor="loss", patience=6, restore_best_weights=True)])
-                self._set_cache("lstm", model)
-                self._set_cache("scaler", scaler)
-            t = Thread(target=train_lstm)
-            t.start()
-            return None  # return early, prediction will be ready next call
+
+            X=np.arange(
+                len(self.monthly_data)
+            ).reshape(
+                -1,
+                1
+            )
+
+
+            y=self.monthly_data.values
+
+
+            model=LinearRegression()
+
+
+            model.fit(
+                X,
+                y
+            )
+
+
+            self.save_cache(
+                "trend",
+                model
+            )
+
+
+
         try:
-            scaled = scaler.transform(self.monthly_data.values.reshape(-1,1))
-            last_seq = scaled[-CONFIG["LSTM_LOOKBACK"]:,0].reshape(1, CONFIG["LSTM_LOOKBACK"],1)
-            pred_scaled = model.predict(last_seq, verbose=0)[0,0]
-            pred = scaler.inverse_transform([[pred_scaled]])[0,0]
-            return float(pred)
-        except Exception:
+
+            return float(
+                model.predict(
+                    [
+                        [
+                            len(
+                                self.monthly_data
+                            )
+                        ]
+                    ]
+                )[0]
+            )
+
+
+        except:
+
             return None
 
-    def get_custom_model_prediction(self) -> Optional[float]:
-        if len(self.monthly_data)<3: return None
-        return float(self.monthly_data.tail(6).mean()*1.05)
 
-    def get_max_prediction(self) -> Optional[float]:
-        preds = [self.get_arima_prediction(), self.get_ml_prediction(), self.get_lstm_prediction(), self.get_trend_prediction(), self.get_custom_model_prediction()]
-        valid = [v for v in preds if v and v>0]
-        return max(valid) if valid else None
 
-# -------------------------- Firestore --------------------------
-def store_prediction_to_firestore(user_uid: str, predicted_expense: float) -> bool:
-    if not db or predicted_expense<=0: return False
-    try:
-        ref = db.collection("users").document(user_uid).collection("prediction").document("next_month")
-        ref.set({"predicted_expense": round(predicted_expense,2), "created_at": datetime.now(), "month": (datetime.now()+timedelta(days=30)).strftime("%B %Y")})
-        return True
-    except Exception as e:
-        print(f"Firestore save error: {e}")
+
+
+    # ---------------- CUSTOM MODEL ----------------
+
+
+    def get_custom(self):
+
+
+        if len(self.monthly_data)<3:
+
+            return None
+
+
+        return float(
+            self.monthly_data
+            .tail(6)
+            .mean()
+            *
+            1.05
+        )
+
+
+
+
+
+    # ---------------- FINAL ----------------
+
+
+    def predict(self):
+
+
+        cache_key=self.uid+"_final"
+
+
+        if cache_key in prediction_cache:
+
+            return prediction_cache[
+                cache_key
+            ]
+
+
+
+        predictions=[
+
+            self.get_arima(),
+
+            self.get_random_forest(),
+
+            self.get_trend(),
+
+            self.get_custom()
+
+        ]
+
+
+
+        valid=[
+
+            x for x in predictions
+
+            if x and x>0
+
+        ]
+
+
+
+        if not valid:
+
+            return None
+
+
+
+        result=max(valid)
+
+
+
+        prediction_cache[
+            cache_key
+        ]=result
+
+
+
+        return result
+
+
+
+
+
+# ==========================================================
+# FIRESTORE SAVE
+# ==========================================================
+
+
+def save_prediction(
+        uid,
+        value
+):
+
+
+    if db is None:
+
         return False
 
-# -------------------------- API Routes --------------------------
-@app.route("/", methods=["GET"])
-def index():
-    return jsonify({"message":"Advanced Expense Prediction API (v2.5)","features":["ARIMA","RandomForest","LSTM (optional)","Trend","Custom Model","Max Prediction","Model Caching"]})
 
-@app.route("/transactions", methods=["GET"])
+
+    try:
+
+
+        db.collection(
+            "users"
+        ).document(
+            uid
+        ).collection(
+            "prediction"
+        ).document(
+            "next_month"
+        ).set(
+
+            {
+
+                "predicted_expense":
+                round(
+                    value,
+                    2
+                ),
+
+
+                "created_at":
+                datetime.now(),
+
+
+                "month":
+                (
+                    datetime.now()
+                    +
+                    timedelta(days=30)
+                )
+                .strftime(
+                    "%B %Y"
+                )
+
+            }
+
+        )
+
+
+        return True
+
+
+
+    except Exception as e:
+
+
+        print(
+            "Save error:",
+            e
+        )
+
+
+        return False
+
+
+
+
+
+# ==========================================================
+# ROUTES
+# ==========================================================
+
+
+@app.route("/")
+def home():
+
+    return jsonify(
+
+        {
+
+            "message":
+            "MoneyMinder Expense Prediction API",
+
+            "version":
+            "3.0",
+
+            "models":
+            [
+                "ARIMA",
+                "RandomForest",
+                "LinearRegression",
+                "CustomAverage"
+            ]
+
+        }
+
+    )
+
+
+
+
+
+@app.route(
+    "/transactions",
+    methods=["GET"]
+)
 @require_auth
-def api_transactions(user_uid):
-    tx = get_user_transactions(user_uid)
-    return jsonify({"success":True,"count":len(tx),"transactions":tx})
+def transactions(uid):
 
-@app.route("/train", methods=["GET"])
+
+    data=get_user_transactions(
+        uid
+    )
+
+
+    return jsonify(
+
+        {
+
+            "success":True,
+
+            "count":
+            len(data),
+
+            "transactions":
+            data
+
+        }
+
+    )
+
+
+
+
+
+@app.route(
+    "/train",
+    methods=["GET"]
+)
 @require_auth
-def train_endpoint(user_uid):
-    tx = get_user_transactions(user_uid)
-    monthly = prepare_monthly_data(tx)
-    if monthly is None or len(monthly)<3:
-        return jsonify({"success":False,"error":"Not enough data to train."}),400
-    engine = PredictionEngine(monthly, user_uid)
-    engine.get_arima_prediction()
-    engine.get_ml_prediction()
-    engine.get_trend_prediction()
-    engine.get_lstm_prediction()  # trains in background
-    engine.get_custom_model_prediction()
-    return jsonify({"success":True,"message":"Models cached/training started","data_points":len(monthly)})
+def train(uid):
 
-@app.route("/predict", methods=["POST"])
+
+    tx=get_user_transactions(
+        uid
+    )
+
+
+    monthly=prepare_monthly_data(
+        tx
+    )
+
+
+    if monthly is None:
+
+        return jsonify(
+
+            {
+                "success":False,
+                "error":"No data"
+            }
+
+        ),400
+
+
+
+
+    engine=PredictionEngine(
+        monthly,
+        uid
+    )
+
+
+    engine.get_arima()
+
+    engine.get_random_forest()
+
+    engine.get_trend()
+
+    engine.get_custom()
+
+
+
+    return jsonify(
+
+        {
+
+            "success":True,
+
+            "message":
+            "Models trained",
+
+            "data_points":
+            len(monthly)
+
+        }
+
+    )
+
+
+
+
+
+@app.route(
+    "/predict",
+    methods=["POST"]
+)
 @require_auth
-def predict_expense(user_uid):
-    tx = get_user_transactions(user_uid)
-    monthly = prepare_monthly_data(tx)
-    if not monthly or monthly.empty:
-        return jsonify({"success":False,"error":"Insufficient data"}),400
-    engine = PredictionEngine(monthly, user_uid)
-    pred = engine.get_max_prediction()
-    stored = store_prediction_to_firestore(user_uid, pred) if pred else False
-    return jsonify({"success": bool(pred),"predicted_expense": round(pred,2) if pred else None,"stored_to_firestore":stored,"data_points_used":len(monthly)})
+def predict(uid):
 
-@app.route("/health", methods=["GET"])
-def health_check():
-    return jsonify({"status":"healthy","firebase_connected":db is not None,"tensorflow_available":TF_AVAILABLE,"timestamp":datetime.now().isoformat()})
 
-# -------------------------- Main --------------------------
+    tx=get_user_transactions(
+        uid
+    )
+
+
+    monthly=prepare_monthly_data(
+        tx
+    )
+
+
+    if monthly is None:
+
+        return jsonify(
+
+            {
+                "success":False,
+                "error":"No transaction data"
+            }
+
+        ),400
+
+
+
+
+    engine=PredictionEngine(
+        monthly,
+        uid
+    )
+
+
+    result=engine.predict()
+
+
+
+    if result is None:
+
+        return jsonify(
+
+            {
+                "success":False,
+                "error":"Prediction failed"
+            }
+
+        ),400
+
+
+
+
+    saved=save_prediction(
+        uid,
+        float(result)
+    )
+
+
+
+    return jsonify(
+
+        {
+
+            "success":True,
+
+            "predicted_expense":
+            round(
+                result,
+                2
+            ),
+
+            "stored":
+            saved
+
+        }
+
+    )
+
+
+
+
+
+@app.route("/health")
+def health():
+
+
+    return jsonify(
+
+        {
+
+            "status":
+            "healthy",
+
+            "firebase":
+            db is not None,
+
+            "time":
+            datetime.now().isoformat()
+
+        }
+
+    )
+
+
+
+
+
+# ==========================================================
+# START SERVER
+# ==========================================================
+
+
 if __name__=="__main__":
-    port=int(os.environ.get("PORT",10000))
-    app.run(host="0.0.0.0",port=port)
+
+
+    port=int(
+        os.environ.get(
+            "PORT",
+            10000
+        )
+    )
+
+
+    app.run(
+
+        host="0.0.0.0",
+
+        port=port
+
+    )
